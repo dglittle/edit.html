@@ -91,13 +91,29 @@ Create access keys and save them:
 aws iam create-access-key --user-name yourdomain-editor
 ```
 
-### 4. Upload the File
+### 4. Configure CORS
+
+Enable CORS so the editor can save files from the browser:
+```bash
+aws s3api put-bucket-cors --bucket yourdomain.com --cors-configuration '{
+    "CORSRules": [
+        {
+            "AllowedHeaders": ["*"],
+            "AllowedMethods": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+            "AllowedOrigins": ["https://yourdomain.com"],
+            "ExposeHeaders": ["ETag"]
+        }
+    ]
+}'
+```
+
+### 5. Upload the File
 
 ```bash
 aws s3 cp edit s3://yourdomain.com/edit --content-type "text/html"
 ```
 
-### 5. Set Up CloudFront (HTTPS)
+### 6. Set Up CloudFront (HTTPS)
 
 **Request an SSL certificate** (must be in us-east-1 for CloudFront):
 ```bash
@@ -171,7 +187,7 @@ If you don't need HTTPS, point your domain CNAME to:
 yourdomain.com.s3-website-YOUR_REGION.amazonaws.com
 ```
 
-### 6. Configure Browser Credentials
+### 7. Configure Browser Credentials
 
 Open your browser's developer console on your site and run:
 
@@ -181,7 +197,7 @@ localStorage.aws_secret = 'YOUR_SECRET_ACCESS_KEY'
 localStorage.aws_region = 'us-east-1'  // or your bucket's region
 ```
 
-### 7. Start Editing
+### 8. Start Editing
 
 Visit `https://yourdomain.com/edit#index` to create/edit your homepage.
 
