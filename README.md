@@ -37,10 +37,14 @@ aws s3 website s3://yourdomain.com --index-document index
 
 ### 2. Set Bucket Policy
 
-Allow public read access:
+First, disable S3 Block Public Access:
+```bash
+aws s3api put-public-access-block --bucket yourdomain.com --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
+```
 
-```json
-{
+Then allow public read access:
+```bash
+aws s3api put-bucket-policy --bucket yourdomain.com --policy '{
     "Version": "2012-10-17",
     "Statement": [
         {
@@ -51,30 +55,41 @@ Allow public read access:
             "Resource": "arn:aws:s3:::yourdomain.com/*"
         }
     ]
-}
+}'
 ```
 
 ### 3. Create IAM User for Editing
 
-Create an IAM user with write access to your bucket:
+Create an IAM user:
+```bash
+aws iam create-user --user-name yourdomain-editor
+```
 
-```json
-{
+Attach a policy with write and list access:
+```bash
+aws iam put-user-policy --user-name yourdomain-editor --policy-name s3-access --policy-document '{
     "Version": "2012-10-17",
     "Statement": [
         {
             "Effect": "Allow",
             "Action": [
                 "s3:PutObject",
-                "s3:PutObjectAcl"
+                "s3:PutObjectAcl",
+                "s3:ListBucket"
             ],
-            "Resource": "arn:aws:s3:::yourdomain.com/*"
+            "Resource": [
+                "arn:aws:s3:::yourdomain.com",
+                "arn:aws:s3:::yourdomain.com/*"
+            ]
         }
     ]
-}
+}'
 ```
 
-Save the Access Key ID and Secret Access Key.
+Create access keys and save them:
+```bash
+aws iam create-access-key --user-name yourdomain-editor
+```
 
 ### 4. Upload the File
 
@@ -82,21 +97,79 @@ Save the Access Key ID and Secret Access Key.
 aws s3 cp edit s3://yourdomain.com/edit --content-type "text/html"
 ```
 
-### 5. Set Up DNS
+### 5. Set Up CloudFront (HTTPS)
 
-**Option A: Direct S3 (HTTP only)**
-
-Point your domain to the S3 website endpoint:
-```
-yourdomain.com → yourdomain.com.s3-website-us-east-1.amazonaws.com
+**Request an SSL certificate** (must be in us-east-1 for CloudFront):
+```bash
+aws acm request-certificate --domain-name yourdomain.com --validation-method DNS --region us-east-1
 ```
 
-**Option B: CloudFront (HTTPS)**
+**Get the DNS validation record**:
+```bash
+aws acm describe-certificate --certificate-arn YOUR_CERT_ARN --region us-east-1 --query 'Certificate.DomainValidationOptions[0].ResourceRecord'
+```
 
-1. Create a CloudFront distribution with your S3 bucket as origin
-2. Add your domain as an alternate domain name (CNAME)
-3. Request an SSL certificate via ACM
-4. Point your domain to the CloudFront distribution
+Add the CNAME record to your DNS provider and wait for validation:
+```bash
+aws acm describe-certificate --certificate-arn YOUR_CERT_ARN --region us-east-1 --query 'Certificate.Status'
+```
+
+**Create CloudFront distribution** (after certificate is validated):
+```bash
+aws cloudfront create-distribution --distribution-config '{
+    "CallerReference": "yourdomain-'$(date +%s)'",
+    "Origins": {
+        "Quantity": 1,
+        "Items": [{
+            "Id": "S3-yourdomain.com",
+            "DomainName": "yourdomain.com.s3-website-YOUR_REGION.amazonaws.com",
+            "CustomOriginConfig": {
+                "HTTPPort": 80,
+                "HTTPSPort": 443,
+                "OriginProtocolPolicy": "http-only"
+            }
+        }]
+    },
+    "DefaultCacheBehavior": {
+        "TargetOriginId": "S3-yourdomain.com",
+        "ViewerProtocolPolicy": "redirect-to-https",
+        "AllowedMethods": {
+            "Quantity": 2,
+            "Items": ["GET", "HEAD"],
+            "CachedMethods": {"Quantity": 2, "Items": ["GET", "HEAD"]}
+        },
+        "ForwardedValues": {"QueryString": true, "Cookies": {"Forward": "none"}},
+        "MinTTL": 0,
+        "DefaultTTL": 86400,
+        "MaxTTL": 31536000,
+        "Compress": true
+    },
+    "Aliases": {"Quantity": 1, "Items": ["yourdomain.com"]},
+    "ViewerCertificate": {
+        "ACMCertificateArn": "YOUR_CERT_ARN",
+        "SSLSupportMethod": "sni-only",
+        "MinimumProtocolVersion": "TLSv1.2_2021"
+    },
+    "Enabled": true,
+    "Comment": "yourdomain.com",
+    "DefaultRootObject": "index"
+}'
+```
+
+**Update DNS**: Point your domain to the CloudFront distribution domain (e.g., `d1234567890.cloudfront.net`).
+
+For root/apex domains, use an ALIAS record (if your DNS provider supports it):
+- **Host**: `@`
+- **Points to**: `d1234567890.cloudfront.net`
+
+For subdomains, use a CNAME record.
+
+**Alternative: Direct S3 (HTTP only)**
+
+If you don't need HTTPS, point your domain CNAME to:
+```
+yourdomain.com.s3-website-YOUR_REGION.amazonaws.com
+```
 
 ### 6. Configure Browser Credentials
 
@@ -137,7 +210,7 @@ The editor includes Claude AI integration (calls Anthropic API directly from the
 
 1. Set your API key in the browser console:
    ```javascript
-   localStorage.setItem('anthropic_api_key', 'sk-ant-...')
+   localStorage.anthropic_api_key = 'sk-ant-...'
    ```
 2. Select text (or use entire file)
 3. Press Cmd+B
