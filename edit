@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      .model-menu {
+        position: fixed;
+        background: #2d2d30;
+        border: 1px solid #464647;
+        border-radius: 4px;
+        padding: 12px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        z-index: 1000;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        min-width: 260px;
+      }
+
+      .model-menu h3 {
+        margin: 0 0 12px 0;
+        color: #cccccc;
+        font-size: 14px;
+        font-weight: 600;
+      }
+
+      .model-option {
+        display: flex;
+        align-items: center;
+        padding: 8px 12px;
+        margin: 4px -12px;
+        cursor: pointer;
+        color: #cccccc;
+        transition: background-color 0.2s;
+      }
+
+      .model-option:hover {
+        background-color: #3e3e42;
+      }
+
+      .model-option.selected {
+        background-color: #094771;
+        color: #ffffff;
+      }
+
+      .model-option input[type="radio"] {
+        margin-right: 8px;
+      }
+
+      .model-name {
+        flex: 1;
+      }
+
+      .model-tag {
+        font-size: 11px;
+        color: #969696;
+        margin-left: 8px;
+      }
+    </style>
+  </head>
+
+  <script src="https://sdk.amazonaws.com/js/aws-sdk-2.604.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs/loader.js"></script>
+
+  <body style="margin: 0">
+    <div
+      id="viewarea"
+      style="position:fixed;right:0;top:0;width:50%;height:100%;background:white"
+    ></div>
+    <div
+      id="editorarea"
+      style="position:fixed;left:0;top:0;width:50%;height:100%;background:black"
+    ></div>
+  </body>
+
+  <script>
+    console.log("edit.html v1.0.0")
+
+    const url = new URL(location.href)
+    const params = new URLSearchParams(window.location.search)
+
+    // Parse key and hold from either hash or search format
+    let key, hold
+
+    if (window.location.hash) {
+      key = window.location.hash.substr(1)
+      hold = params.has("hold")
+    } else {
+      ;[key, hold] = location.search
+        .slice(1)
+        .split("?")
+        .map(decodeURIComponent)
+    }
+
+    // AI Model selection
+    const AI_MODELS = {
+      SONNET: "claude-sonnet-4-5-20250929",
+      OPUS: "claude-opus-4-5-20251101",
+    }
+
+    function getCurrentModel() {
+      return localStorage.getItem("selected_ai_model") || AI_MODELS.SONNET
+    }
+
+    function setCurrentModel(model) {
+      localStorage.setItem("selected_ai_model", model)
+    }
+
+    // Initialize Monaco Editor
+    require.config({
+      paths: { vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.44.0/min/vs" },
+    })
+
+    require(["vs/editor/editor.main"], async function () {
+      window.editor = monaco.editor.create(
+        document.getElementById("editorarea"),
+        {
+          value: "loading...",
+          language: "html",
+          theme: "vs-dark",
+          wordWrap: "on",
+          wrappingIndent: "indent",
+          minimap: { enabled: false },
+          glyphMargin: false,
+          automaticLayout: true,
+          stickyScroll: { enabled: false },
+        }
+      )
+
+      // Load initial content
+      if (key) {
+        const ext = key.match(/\.([^\.]+)$/)?.[1]
+        const languageMap = {
+          js: "javascript",
+          html: "html",
+          htm: "html",
+          css: "css",
+          json: "json",
+          xml: "xml",
+          md: "markdown",
+        }
+        const language = languageMap[ext] || "html"
+        monaco.editor.setModelLanguage(window.editor.getModel(), language)
+
+        const response = await fetch("/" + key)
+        const code = response.ok ? await response.text() : "nothing here..."
+        editor.getModel().setValue(code)
+
+        if (!hold) {
+          drawViewarea()
+        }
+      }
+
+      // Keyboard shortcuts
+      document.body.onkeydown = async function (e) {
+        if (e.code == "KeyP" && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault()
+          await prettifyCode()
+        } else if (
+          e.code == "KeyB" &&
+          (e.ctrlKey || e.metaKey) &&
+          e.shiftKey
+        ) {
+          e.preventDefault()
+          showModelMenu()
+        } else if (
+          e.code == "KeyB" &&
+          (e.ctrlKey || e.metaKey) &&
+          !e.shiftKey
+        ) {
+          e.preventDefault()
+          invokeClaude()
+        } else if (
+          (e.shiftKey || e.ctrlKey || e.metaKey) &&
+          ((e.keyCode == 83 && !e.shiftKey) || e.keyCode == 13)
+        ) {
+          e.preventDefault()
+          await saveToS3()
+        }
+      }
+    })
+
+    // Save to S3
+    async function saveToS3() {
+      AWS.config.credentials = new AWS.Credentials(
+        localStorage.aws_id,
+        localStorage.aws_secret
+      )
+      const s3 = new AWS.S3({ region: localStorage.aws_region })
+
+      await s3
+        .putObject({
+          Bucket: url.hostname,
+          Key: key,
+          Body: editor.getModel().getValue(),
+          ContentType: "text/html",
+          CacheControl: "no-cache",
+        })
+        .promise()
+
+      drawViewarea()
+    }
+
+    // Draw preview
+    function drawViewarea() {
+      if (!key) return
+      viewarea.innerHTML = ""
+      const f = document.createElement("iframe")
+      f.setAttribute(
+        "sandbox",
+        "allow-same-origin allow-scripts allow-popups allow-forms allow-presentation allow-modals allow-downloads-without-user-activation allow-downloads"
+      )
+      f.setAttribute("src", "/" + key + "?" + Math.random())
+      f.setAttribute("frameBorder", "0")
+      f.style.width = "100%"
+      f.style.height = "100%"
+      viewarea.append(f)
+    }
+
+    // Handle hash changes
+    window.addEventListener("hashchange", function () {
+      location.reload()
+    })
+
+    // Model selection menu
+    function showModelMenu() {
+      const existingMenu = document.querySelector(".model-menu")
+      if (existingMenu) {
+        existingMenu.remove()
+        return
+      }
+
+      const menu = document.createElement("div")
+      menu.className = "model-menu"
+      menu.style.left = "50%"
+      menu.style.top = "50%"
+      menu.style.transform = "translate(-50%, -50%)"
+
+      const currentModel = getCurrentModel()
+
+      menu.innerHTML = `
+        <h3>Select AI Model</h3>
+        <div class="model-option ${currentModel === AI_MODELS.SONNET ? "selected" : ""}" data-model="${AI_MODELS.SONNET}">
+          <input type="radio" name="model" value="${AI_MODELS.SONNET}" ${currentModel === AI_MODELS.SONNET ? "checked" : ""}>
+          <span class="model-name">${AI_MODELS.SONNET}</span>
+          <span class="model-tag">Faster</span>
+        </div>
+        <div class="model-option ${currentModel === AI_MODELS.OPUS ? "selected" : ""}" data-model="${AI_MODELS.OPUS}">
+          <input type="radio" name="model" value="${AI_MODELS.OPUS}" ${currentModel === AI_MODELS.OPUS ? "checked" : ""}>
+          <span class="model-name">${AI_MODELS.OPUS}</span>
+          <span class="model-tag">More capable</span>
+        </div>
+      `
+
+      document.body.appendChild(menu)
+
+      const options = menu.querySelectorAll(".model-option")
+      options.forEach((option) => {
+        option.addEventListener("click", () => {
+          const selectedModel = option.dataset.model
+          setCurrentModel(selectedModel)
+          options.forEach((opt) => opt.classList.remove("selected"))
+          option.classList.add("selected")
+          option.querySelector('input[type="radio"]').checked = true
+          setTimeout(() => menu.remove(), 150)
+        })
+      })
+
+      const handleOutsideClick = (e) => {
+        if (!menu.contains(e.target)) {
+          menu.remove()
+          document.removeEventListener("click", handleOutsideClick)
+        }
+      }
+
+      const handleEscape = (e) => {
+        if (e.key === "Escape") {
+          menu.remove()
+          document.removeEventListener("keydown", handleEscape)
+        }
+      }
+
+      setTimeout(() => {
+        document.addEventListener("click", handleOutsideClick)
+        document.addEventListener("keydown", handleEscape)
+      }, 100)
+    }
+
+    // Claude AI integration (direct API call)
+    async function invokeClaude() {
+      const apiKey = localStorage.getItem("anthropic_api_key")
+      if (!apiKey) {
+        alert("Please set your Anthropic API key in localStorage:\n\nlocalStorage.setItem('anthropic_api_key', 'sk-ant-...')")
+        return
+      }
+
+      const selectedText = getSelectedText()
+      const text = selectedText || editor.getModel().getValue()
+
+      const abortController = new AbortController()
+
+      const diffEditorResult = displayDiff(
+        "",
+        text,
+        selectedText ? editor.getSelection() : null,
+        abortController
+      )
+
+      try {
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "anthropic-dangerous-direct-browser-access": "true",
+          },
+          body: JSON.stringify({
+            model: getCurrentModel(),
+            max_tokens: 4096 * 4,
+            stream: true,
+            messages: [{ role: "user", content: text }],
+          }),
+          signal: abortController.signal,
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          throw new Error(`API Error ${response.status}: ${errorText}`)
+        }
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder("utf-8")
+        let buffer = ""
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          buffer += decoder.decode(value, { stream: true })
+          const lines = buffer.split("\n")
+          buffer = lines.pop()
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const jsonStr = line.slice(6)
+              try {
+                const data = JSON.parse(jsonStr)
+                if (data.type === "content_block_delta" && data.delta?.text) {
+                  diffEditorResult.append(data.delta.text)
+                }
+              } catch (e) {
+                // Ignore parse errors for incomplete chunks
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== "AbortError") {
+          console.error("Claude API error:", err)
+          alert("Error calling Claude API: " + err.message)
+        }
+      }
+    }
+
+    function getSelectedText() {
+      const editorSelection = editor.getSelection()
+      return editor.getModel().getValueInRange(editorSelection)
+    }
+
+    // Diff display for AI responses
+    function displayDiff(aiResponse, originalText, originalSelection, abortController) {
+      const output = document.createElement("div")
+      output.style.position = "fixed"
+      output.style.left = "0px"
+      output.style.top = "0px"
+      output.style.right = "0px"
+      output.style.bottom = "0px"
+      output.style.zIndex = "100"
+      document.body.append(output)
+
+      editorarea.style.width = "100%"
+
+      // Create container for diff editor
+      const diffContainer = document.createElement("div")
+      diffContainer.style.width = "100%"
+      diffContainer.style.height = "100%"
+      output.append(diffContainer)
+
+      // Create Monaco diff editor
+      const diffEditor = monaco.editor.createDiffEditor(diffContainer, {
+        wordWrap: "on",
+        wrappingIndent: "indent",
+        theme: "vs-dark",
+        minimap: { enabled: false },
+        glyphMargin: false,
+        folding: false,
+        automaticLayout: true,
+        stickyScroll: { enabled: false },
+        renderSideBySide: true,
+        ignoreTrimWhitespace: false,
+        renderIndicators: true,
+        originalEditable: true,
+        diffCodeLens: false,
+        scrollBeyondLastLine: true,
+        lineNumbers: "on",
+        renderLineHighlight: "all",
+        renderWhitespace: "selection",
+      })
+
+      // Create models for original and modified content
+      const originalModel = monaco.editor.createModel(originalText, "plaintext")
+      const modifiedModel = monaco.editor.createModel(aiResponse, "plaintext")
+
+      diffEditor.setModel({
+        original: originalModel,
+        modified: modifiedModel,
+      })
+
+      // Function to append text to modified model (for streaming)
+      const appendToModified = (text) => {
+        const lastLine = modifiedModel.getLineCount()
+        const lastColumn = modifiedModel.getLineMaxColumn(lastLine)
+        modifiedModel.pushEditOperations(
+          [],
+          [
+            {
+              range: new monaco.Range(lastLine, lastColumn, lastLine, lastColumn),
+              text: text,
+              forceMoveMarkers: true,
+            },
+          ],
+          () => null
+        )
+      }
+
+      const acceptButton = document.createElement("button")
+      acceptButton.innerHTML = "Accept"
+      acceptButton.style.position = "absolute"
+      acceptButton.style.bottom = "10px"
+      acceptButton.style.left = "10px"
+      acceptButton.style.zIndex = "101"
+      acceptButton.onclick = () => {
+        const text = modifiedModel.getValue()
+        if (originalSelection) {
+          editor.executeEdits("", [
+            {
+              identifier: "replaceSelectedText",
+              range: originalSelection,
+              text,
+              forceMoveMarkers: true,
+            },
+          ])
+        } else {
+          editor.getModel().setValue(text)
+        }
+        // Dispose models and diff editor
+        originalModel.dispose()
+        modifiedModel.dispose()
+        diffEditor.dispose()
+        editorarea.style.width = "50%"
+        output.remove()
+      }
+      output.appendChild(acceptButton)
+
+      const cancelButton = document.createElement("button")
+      cancelButton.innerHTML = "Cancel"
+      cancelButton.style.position = "absolute"
+      cancelButton.style.bottom = "10px"
+      cancelButton.style.right = "10px"
+      cancelButton.style.zIndex = "101"
+      cancelButton.id = "cancelBtn"
+      cancelButton.onclick = () => {
+        abortController.abort()
+        // Dispose models and diff editor
+        originalModel.dispose()
+        modifiedModel.dispose()
+        diffEditor.dispose()
+        editorarea.style.width = "50%"
+        output.remove()
+      }
+      output.appendChild(cancelButton)
+
+      document.addEventListener("keydown", function escHandler(event) {
+        if (event.key === "Escape" && document.getElementById("cancelBtn")) {
+          cancelButton.click()
+          document.removeEventListener("keydown", escHandler)
+        }
+      })
+
+      return {
+        append: appendToModified,
+      }
+    }
+
+    // Prettify code with Prettier
+    async function prettifyCode() {
+      const selectedText = getSelectedText()
+      const text = selectedText || editor.getModel().getValue()
+      const isHTML = /^\s*</.test(text)
+
+      const workerCode = `
+        self.importScripts(
+          "https://cdn.jsdelivr.net/npm/prettier@2.8.7/standalone.js",
+          "https://cdn.jsdelivr.net/npm/prettier@2.8.7/parser-babel.js",
+          "https://cdn.jsdelivr.net/npm/prettier@2.8.7/parser-html.js"
+        );
+
+        self.addEventListener("message", (event) => {
+          const { code, isHTML } = event.data;
+          const parser = isHTML ? "html" : "babel";
+          const prettyText = prettier.format(code, {
+            parser: parser,
+            plugins: prettierPlugins,
+            tabWidth: 4,
+            semi: false,
+            printWidth: 160,
+          });
+          self.postMessage(prettyText);
+        });
+      `
+
+      const blob = new Blob([workerCode], { type: "application/javascript" })
+      const workerUrl = URL.createObjectURL(blob)
+      const worker = new Worker(workerUrl)
+
+      worker.onmessage = (event) => {
+        const prettyText = event.data
+        if (selectedText) {
+          const selection = editor.getSelection()
+          editor.executeEdits("", [
+            {
+              identifier: "replaceSelectedText",
+              range: selection,
+              text: prettyText,
+              forceMoveMarkers: true,
+            },
+          ])
+        } else {
+          editor.getModel().setValue(prettyText)
+        }
+        worker.terminate()
+      }
+
+      worker.onerror = (error) => {
+        console.error("Worker error:", error)
+        worker.terminate()
+      }
+
+      worker.postMessage({ code: text, isHTML })
+    }
+  </script>
+</html>
